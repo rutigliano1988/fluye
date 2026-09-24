@@ -75,7 +75,7 @@ npm run build
 npm run dist
 ```
 
-La versión actual se genera en `release-package/Fluye-Setup-0.3.0.exe`. El instalador
+La versión actual se genera en `release-package/Fluye-Setup-0.3.1.exe`. El instalador
 permite elegir la carpeta, crea accesos directos en el escritorio y el menú
 Inicio, y abre Fluye al terminar. En el primer arranque aparece el asistente de
 configuración; puede volver a abrirse desde **Ajustes → Conexión**.
@@ -86,7 +86,7 @@ Las actualizaciones usan el repositorio público
 [`rutigliano1988/fluye`](https://github.com/rutigliano1988/fluye). Para publicar:
 
 1. Actualiza `version` en `package.json` y `package-lock.json`.
-2. Confirma los cambios y crea una etiqueta con el mismo número, por ejemplo `v0.3.0`.
+2. Confirma los cambios y crea una etiqueta con el mismo número, por ejemplo `v0.3.1`.
 3. Sube la etiqueta a GitHub.
 4. El workflow `Release Windows` compila el instalador y publica el `.exe`, su
    blockmap y `latest.yml` en GitHub Releases.

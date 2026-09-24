@@ -25,6 +25,9 @@ jobs:
       - name: Instalar dependencias
         run: npm ci
 
+      - name: Preparar Electron para Windows
+        run: node scripts/ensure-electron.cjs
+
       - name: Verificar versión de la etiqueta
         if: github.ref_type == 'tag'
         shell: pwsh

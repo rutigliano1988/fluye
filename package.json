@@ -1,11 +1,16 @@
 {
   "name": "fluye-windows",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Dictado inteligente para Windows",
   "main": "./out/main/index.js",
   "type": "module",
   "author": "Fluye",
   "license": "MIT",
+  "allowScripts": {
+    "electron-winstaller": false,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rutigliano1988/fluye.git"
