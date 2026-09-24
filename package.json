@@ -1,0 +1,44 @@
+{
+  "name": "fluye-windows",
+  "version": "0.3.0",
+  "description": "Dictado inteligente para Windows",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "author": "Fluye",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rutigliano1988/fluye.git"
+  },
+  "homepage": "https://github.com/rutigliano1988/fluye",
+  "scripts": {
+    "predev": "node scripts/ensure-electron.cjs",
+    "dev": "electron-vite dev",
+    "repair:electron": "node scripts/ensure-electron.cjs --force",
+    "typecheck": "tsc --noEmit",
+    "build:main": "esbuild src/main/index.ts --bundle --platform=node --format=esm --target=node22 --external:electron --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=out/main/index.js",
+    "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --format=cjs --target=node22 --external:electron --outfile=out/preload/index.cjs",
+    "build:renderer": "esbuild src/renderer/src/main.tsx --bundle --platform=browser --format=esm --target=chrome140 --outdir=out/renderer/assets --entry-names=main",
+    "build": "npm run typecheck && npm run build:main && npm run build:preload && npm run build:renderer && node scripts/prepare-renderer.mjs && node scripts/prepare-package.mjs",
+    "dist": "npm run build && electron-builder --projectDir .packaging --config ../electron-builder.yml --win nsis --publish never",
+    "release": "npm run build && electron-builder --projectDir .packaging --config ../electron-builder.yml --win nsis --publish always",
+    "preview": "electron-vite preview"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "electron-updater": "^6.8.9",
+    "electron-vite": "^5.0.0",
+    "openai": "^7.23.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6",
+    "ws": "^8.21.3"
+  }
+}

@@ -1,0 +1,41 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Verificar versión de la etiqueta
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_NAME -ne "v$packageVersion") {
+            throw "La etiqueta $env:GITHUB_REF_NAME no coincide con package.json ($packageVersion)."
+          }
+
+      - name: Compilar y publicar GitHub Release
+        run: npm run release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'

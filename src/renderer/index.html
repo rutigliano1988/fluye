@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.openai.com ws://localhost:*; media-src 'self' blob:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#173f35" />
+    <title>Fluye</title>
+    <style>
+      .source-file-notice {
+        display: grid;
+        min-height: 100vh;
+        place-items: center;
+        padding: 32px;
+        color: #173f35;
+        background: #f3efe6;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      .source-file-notice article {
+        max-width: 520px;
+        padding: 38px;
+        border: 1px solid #d8d0c0;
+        border-radius: 22px;
+        background: #fffdf8;
+        box-shadow: 0 18px 50px rgba(40, 47, 39, .09);
+      }
+      .source-file-notice h1 { margin: 0 0 12px; font-family: Georgia, serif; font-weight: 500; }
+      .source-file-notice p { color: #66766e; line-height: 1.55; }
+      .source-file-notice code { display: block; padding: 12px 14px; border-radius: 9px; color: #f8f3e8; background: #173f35; }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <main class="source-file-notice">
+        <article>
+          <h1>Fluye es una aplicación de escritorio</h1>
+          <p>Este archivo es parte del código fuente y no se abre directamente en el navegador. Cierra esta pestaña y, desde la carpeta del proyecto, ejecuta:</p>
+          <code>npm run dev</code>
+          <p>También puedes hacer doble clic en <strong>Abrir-Fluye.cmd</strong>.</p>
+        </article>
+      </main>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
