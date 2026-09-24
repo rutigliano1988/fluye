@@ -20,6 +20,12 @@ files:
   - out/**/*
   - package.json
 
+extraResources:
+  - from: ../vendor/whisper
+    to: local-whisper
+    filter:
+      - '**/*'
+
 win:
   icon: ../build/icon.ico
   target:

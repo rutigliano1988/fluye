@@ -3,6 +3,7 @@ out/
 .packaging/
 release*/
 work/
+vendor/whisper/
 *.log
 .env
 .env.*

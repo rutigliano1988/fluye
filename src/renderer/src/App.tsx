@@ -35,6 +35,7 @@ const emptyDraft: SaveSettingsInput = {
   mode: 'clean',
   autoPaste: true,
   launchAtLogin: false,
+  transcriptionProvider: 'openai',
   realtimeEnabled: true,
   realtimeDelay: 'low',
   transcriptionModel: 'gpt-transcribe',
@@ -52,6 +53,7 @@ function settingsToDraft(settings: PublicSettings): SaveSettingsInput {
     mode: settings.mode,
     autoPaste: settings.autoPaste,
     launchAtLogin: settings.launchAtLogin,
+    transcriptionProvider: settings.transcriptionProvider,
     realtimeEnabled: settings.realtimeEnabled,
     realtimeDelay: settings.realtimeDelay,
     transcriptionModel: settings.transcriptionModel,
@@ -76,8 +78,7 @@ function cleanError(error: unknown): string {
     .replace(/^Error: /, '')
 }
 
-function resampleToPcm16(input: Float32Array, inputRate: number): Uint8Array {
-  const outputRate = 24_000
+function resampleToPcm16(input: Float32Array, inputRate: number, outputRate: number): Uint8Array {
   const outputLength = Math.max(1, Math.round(input.length * outputRate / inputRate))
   const pcm = new Int16Array(outputLength)
 
@@ -92,6 +93,36 @@ function resampleToPcm16(input: Float32Array, inputRate: number): Uint8Array {
   }
 
   return new Uint8Array(pcm.buffer)
+}
+
+function pcm16ToWav(chunks: Uint8Array[], sampleRate: number): Uint8Array {
+  const dataLength = chunks.reduce((total, chunk) => total + chunk.byteLength, 0)
+  const wav = new Uint8Array(44 + dataLength)
+  const view = new DataView(wav.buffer)
+  const writeText = (offset: number, value: string): void => {
+    for (let index = 0; index < value.length; index += 1) wav[offset + index] = value.charCodeAt(index)
+  }
+
+  writeText(0, 'RIFF')
+  view.setUint32(4, 36 + dataLength, true)
+  writeText(8, 'WAVE')
+  writeText(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  writeText(36, 'data')
+  view.setUint32(40, dataLength, true)
+
+  let offset = 44
+  for (const chunk of chunks) {
+    wav.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return wav
 }
 
 export default function App(): React.JSX.Element {
@@ -127,6 +158,7 @@ export default function App(): React.JSX.Element {
   const realtimeReadyRef = useRef(false)
   const realtimeStartRef = useRef<Promise<boolean> | null>(null)
   const realtimeQueueRef = useRef<Uint8Array[]>([])
+  const localAudioRef = useRef<Uint8Array[]>([])
   const startingRecordingRef = useRef(false)
   const stopAfterStartRef = useRef(false)
   const discardRecordingRef = useRef(false)
@@ -201,7 +233,7 @@ export default function App(): React.JSX.Element {
     realtimeAudioRef.current = null
   }, [])
 
-  const startRealtimeCapture = useCallback((stream: MediaStream) => {
+  const startPcmCapture = useCallback((stream: MediaStream, destination: 'openai' | 'local') => {
     const context = new AudioContext()
     const source = context.createMediaStreamSource(stream)
     const processor = context.createScriptProcessor(4096, 1, 1)
@@ -209,7 +241,15 @@ export default function App(): React.JSX.Element {
     silentGain.gain.value = 0
 
     processor.onaudioprocess = (event) => {
-      const bytes = resampleToPcm16(event.inputBuffer.getChannelData(0), context.sampleRate)
+      const bytes = resampleToPcm16(
+        event.inputBuffer.getChannelData(0),
+        context.sampleRate,
+        destination === 'local' ? 16_000 : 24_000
+      )
+      if (destination === 'local') {
+        localAudioRef.current.push(bytes)
+        return
+      }
       if (realtimeReadyRef.current) {
         window.fluye.appendRealtimeAudio(bytes)
       } else if (realtimeQueueRef.current.length < 160) {
@@ -231,9 +271,15 @@ export default function App(): React.JSX.Element {
 
   const startRecording = useCallback(async (intent: RecordingIntent = 'dictation') => {
     if (statusRef.current !== 'idle' && statusRef.current !== 'success' && statusRef.current !== 'error') return
-    if (!settings?.hasApiKey) {
+    if (!settings) return
+    if (settings.transcriptionProvider === 'openai' && !settings.hasApiKey) {
       setTab('settings')
       setAppStatus('error', 'Configura tu clave de API')
+      return
+    }
+    if (intent === 'edit' && !settings.hasApiKey) {
+      setTab('settings')
+      setAppStatus('error', 'La edición por voz necesita una clave de OpenAI')
       return
     }
 
@@ -253,6 +299,7 @@ export default function App(): React.JSX.Element {
       streamRef.current = stream
       startLevelMeter(stream)
       chunksRef.current = []
+      localAudioRef.current = []
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/webm'
@@ -279,6 +326,7 @@ export default function App(): React.JSX.Element {
           realtimeReadyRef.current = false
           realtimeStartRef.current = null
           realtimeQueueRef.current = []
+          localAudioRef.current = []
           void window.fluye.cancelRealtime()
           return
         }
@@ -286,19 +334,24 @@ export default function App(): React.JSX.Element {
         setAppStatus('processing', 'Finalizando la transcripción…')
 
         try {
-          const realtimeAvailable = await (realtimeStartRef.current ?? Promise.resolve(false))
           let result: DictationResult
 
-          if (realtimeAvailable) {
-            try {
-              result = await window.fluye.finishRealtime(durationMs)
-            } catch {
+          if (settings.transcriptionProvider === 'local') {
+            const bytes = pcm16ToWav(localAudioRef.current, 16_000)
+            result = await window.fluye.processAudio({ bytes, mimeType: 'audio/wav', durationMs })
+          } else {
+            const realtimeAvailable = await (realtimeStartRef.current ?? Promise.resolve(false))
+            if (realtimeAvailable) {
+              try {
+                result = await window.fluye.finishRealtime(durationMs)
+              } catch {
+                const bytes = new Uint8Array(await blob.arrayBuffer())
+                result = await window.fluye.processAudio({ bytes, mimeType: recorder.mimeType, durationMs })
+              }
+            } else {
               const bytes = new Uint8Array(await blob.arrayBuffer())
               result = await window.fluye.processAudio({ bytes, mimeType: recorder.mimeType, durationMs })
             }
-          } else {
-            const bytes = new Uint8Array(await blob.arrayBuffer())
-            result = await window.fluye.processAudio({ bytes, mimeType: recorder.mimeType, durationMs })
           }
 
           setLastResult(result)
@@ -319,6 +372,7 @@ export default function App(): React.JSX.Element {
           realtimeReadyRef.current = false
           realtimeStartRef.current = null
           realtimeQueueRef.current = []
+          localAudioRef.current = []
         }
       }
 
@@ -330,8 +384,13 @@ export default function App(): React.JSX.Element {
 
       realtimeReadyRef.current = false
       realtimeQueueRef.current = []
-      if (settings.realtimeEnabled) {
-        startRealtimeCapture(stream)
+      if (settings.transcriptionProvider === 'local') {
+        startPcmCapture(stream, 'local')
+        realtimeStartRef.current = Promise.resolve(false)
+        setMessage('Transcripción local · el texto aparecerá al terminar')
+        window.fluye.setStatus({ status: 'recording', message: 'Transcripción local · el texto aparecerá al terminar' })
+      } else if (settings.realtimeEnabled) {
+        startPcmCapture(stream, 'openai')
         realtimeStartRef.current = window.fluye.startRealtime()
           .then(() => {
             realtimeReadyRef.current = true
@@ -370,6 +429,7 @@ export default function App(): React.JSX.Element {
       void window.fluye.cancelRealtime()
       streamRef.current?.getTracks().forEach((track) => track.stop())
       streamRef.current = null
+      localAudioRef.current = []
       stopLevelMeter()
       setAppStatus(
         'error',
@@ -378,7 +438,7 @@ export default function App(): React.JSX.Element {
           : cleanError(error)
       )
     }
-  }, [setAppStatus, settings, startLevelMeter, startRealtimeCapture, stopLevelMeter, stopRealtimeCapture])
+  }, [setAppStatus, settings, startLevelMeter, startPcmCapture, stopLevelMeter, stopRealtimeCapture])
 
   const requestStartRecording = useCallback((intent: RecordingIntent = 'dictation') => {
     if (startingRecordingRef.current || statusRef.current === 'recording' || statusRef.current === 'processing') return
@@ -575,6 +635,9 @@ export default function App(): React.JSX.Element {
   )
 
   const isBusy = status === 'processing'
+  const readyToDictate = Boolean(
+    settings && (settings.transcriptionProvider === 'local' || settings.hasApiKey)
+  )
 
   const saveOnboardingChanges = async (
     changes: Partial<SaveSettingsInput>
@@ -615,8 +678,12 @@ export default function App(): React.JSX.Element {
           </button>
         </nav>
         <div className="sidebar__foot">
-          <span className={`connection-dot ${settings?.hasApiKey ? 'ready' : ''}`} />
-          {settings?.hasApiKey ? 'Listo para dictar' : 'Falta configurar la API'}
+          <span className={`connection-dot ${readyToDictate ? 'ready' : ''}`} />
+          {settings?.transcriptionProvider === 'local'
+            ? 'Listo · motor local'
+            : settings?.hasApiKey
+              ? 'Listo · OpenAI'
+              : 'Falta configurar la API'}
         </div>
       </aside>
 
@@ -673,7 +740,9 @@ export default function App(): React.JSX.Element {
                 {shortcutLabel.map((key) => <kbd key={key}>{key}</kbd>)}
               </div>
               <span className="edit-shortcut-hint">
-                Selecciona texto y usa {editShortcutLabel} para editarlo con la voz
+                {settings?.hasApiKey
+                  ? <>Selecciona texto y usa {editShortcutLabel} para editarlo con la voz</>
+                  : 'El dictado local funciona sin clave · la edición por voz es opcional con OpenAI'}
               </span>
               {status === 'recording' && (
                 <>
@@ -696,7 +765,11 @@ export default function App(): React.JSX.Element {
                 <h3>{modeNames[settings?.mode ?? 'clean']}</h3>
                 <p>{modeDescriptions[settings?.mode ?? 'clean']}</p>
                 <div className="mode-pills">
-                  {(Object.keys(modeNames) as DictationMode[]).map((mode) => (
+                  {(
+                    settings?.transcriptionProvider === 'local'
+                      ? ['literal' as const]
+                      : Object.keys(modeNames) as DictationMode[]
+                  ).map((mode) => (
                     <button
                       key={mode}
                       className={(settings?.mode ?? 'clean') === mode ? 'selected' : ''}
@@ -704,7 +777,7 @@ export default function App(): React.JSX.Element {
                         if (!settings) return
                         const updated = await window.fluye.saveSettings({ ...draft, mode })
                         setSettings(updated)
-                        setDraft((value) => ({ ...value, mode }))
+                        setDraft(settingsToDraft(updated))
                       }}
                     >
                       {modeNames[mode]}
@@ -771,11 +844,34 @@ export default function App(): React.JSX.Element {
             <section className="settings-section">
               <div className="settings-section__intro">
                 <span className="section-number">01</span>
-                <div><h2>Conexión</h2><p>La clave se cifra con la protección de Windows y nunca se muestra de nuevo.</p></div>
+                <div><h2>Motor</h2><p>Elige entre privacidad local o transcripción en la nube con texto en vivo.</p></div>
               </div>
-              <div className="form-card">
+              <div className="form-card engine-card">
                 <label className="field">
-                  <span>Clave de API de OpenAI</span>
+                  <span>Motor de transcripción</span>
+                  <select
+                    value={draft.transcriptionProvider}
+                    onChange={(event) => {
+                      const transcriptionProvider = event.target.value as PublicSettings['transcriptionProvider']
+                      setDraft({
+                        ...draft,
+                        transcriptionProvider,
+                        mode: transcriptionProvider === 'local' ? 'literal' : draft.mode,
+                        realtimeEnabled: transcriptionProvider === 'openai' && draft.realtimeEnabled
+                      })
+                    }}
+                  >
+                    <option value="local">Local · Whisper Base, sin clave</option>
+                    <option value="openai">OpenAI · nube y texto en tiempo real</option>
+                  </select>
+                  <small>
+                    {draft.transcriptionProvider === 'local'
+                      ? 'El audio se procesa en este PC y no se envía a Internet.'
+                      : 'El audio se envía a OpenAI para transcribirlo.'}
+                  </small>
+                </label>
+                <label className="field">
+                  <span>Clave de API de OpenAI {draft.transcriptionProvider === 'local' ? '· opcional' : ''}</span>
                   <div className="input-with-badge">
                     <input
                       type="password"
@@ -784,8 +880,11 @@ export default function App(): React.JSX.Element {
                       placeholder={settings?.hasApiKey ? '••••••••••••••••  Guardada' : 'sk-…'}
                       autoComplete="off"
                     />
-                    <span className={settings?.hasApiKey ? 'badge badge--ok' : 'badge'}>{settings?.hasApiKey ? 'Protegida' : 'Pendiente'}</span>
+                    <span className={settings?.hasApiKey ? 'badge badge--ok' : 'badge'}>
+                      {settings?.hasApiKey ? 'Protegida' : draft.transcriptionProvider === 'local' ? 'No necesaria' : 'Pendiente'}
+                    </span>
                   </div>
+                  <small>En modo local solo se usa si invocas la edición de una selección con la voz.</small>
                 </label>
                 {settings?.hasApiKey && <button type="button" className="danger-link" onClick={clearApiKey}>Eliminar clave guardada</button>}
                 <button type="button" className="onboarding-again" onClick={() => setShowOnboarding(true)}>Volver a abrir el asistente inicial</button>
@@ -842,12 +941,13 @@ export default function App(): React.JSX.Element {
                 </label>
                 <label className="field">
                   <span>Modo predeterminado</span>
-                  <select value={draft.mode} onChange={(event) => setDraft({ ...draft, mode: event.target.value as DictationMode })}>
+                  <select disabled={draft.transcriptionProvider === 'local'} value={draft.mode} onChange={(event) => setDraft({ ...draft, mode: event.target.value as DictationMode })}>
                     {(Object.keys(modeNames) as DictationMode[]).map((mode) => <option key={mode} value={mode}>{modeNames[mode]}</option>)}
                   </select>
+                  {draft.transcriptionProvider === 'local' && <small>Whisper entrega la transcripción literal con su puntuación propia.</small>}
                 </label>
                 <div className="toggle-stack">
-                  <label className="toggle-row"><span><strong>Transcripción en tiempo real</strong><small>Muestra el texto mientras estás hablando</small></span><input type="checkbox" checked={draft.realtimeEnabled} onChange={(event) => setDraft({ ...draft, realtimeEnabled: event.target.checked })} /></label>
+                  <label className={`toggle-row ${draft.transcriptionProvider === 'local' ? 'is-disabled' : ''}`}><span><strong>Transcripción en tiempo real</strong><small>{draft.transcriptionProvider === 'local' ? 'Disponible al usar OpenAI' : 'Muestra el texto mientras estás hablando'}</small></span><input type="checkbox" disabled={draft.transcriptionProvider === 'local'} checked={draft.realtimeEnabled} onChange={(event) => setDraft({ ...draft, realtimeEnabled: event.target.checked })} /></label>
                   <label className="toggle-row"><span><strong>Pegar automáticamente</strong><small>Inserta el texto en la ventana activa</small></span><input type="checkbox" checked={draft.autoPaste} onChange={(event) => setDraft({ ...draft, autoPaste: event.target.checked })} /></label>
                   <label className="toggle-row"><span><strong>Iniciar con Windows</strong><small>Deja Fluye preparado en la bandeja</small></span><input type="checkbox" checked={draft.launchAtLogin} onChange={(event) => setDraft({ ...draft, launchAtLogin: event.target.checked })} /></label>
                 </div>
@@ -873,7 +973,7 @@ export default function App(): React.JSX.Element {
                 <details className="advanced">
                   <summary>Configuración avanzada de modelos</summary>
                   <div className="form-grid advanced-grid">
-                    <label className="field"><span>Transcripción</span><input value={draft.transcriptionModel} onChange={(event) => setDraft({ ...draft, transcriptionModel: event.target.value })} /></label>
+                    <label className="field"><span>Transcripción OpenAI</span><input disabled={draft.transcriptionProvider === 'local'} value={draft.transcriptionModel} onChange={(event) => setDraft({ ...draft, transcriptionModel: event.target.value })} /></label>
                     <label className="field"><span>Pulido</span><input value={draft.polishModel} onChange={(event) => setDraft({ ...draft, polishModel: event.target.value })} /></label>
                     <label className="field">
                       <span>Latencia en vivo</span>

@@ -14,7 +14,9 @@ import {
 } from 'electron'
 import { spawn } from 'node:child_process'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { availableParallelism, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import OpenAI, { toFile } from 'openai'
@@ -52,6 +54,7 @@ const defaultSettings: StoredSettings = {
   mode: 'clean',
   autoPaste: true,
   launchAtLogin: false,
+  transcriptionProvider: 'openai',
   realtimeEnabled: true,
   realtimeDelay: 'low',
   transcriptionModel: 'gpt-transcribe',
@@ -1099,10 +1102,82 @@ function realtimeUpdate(): RealtimeSessionUpdate {
   }
 }
 
+function localWhisperDirectory(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'local-whisper')
+    : join(currentDir, '..', '..', 'vendor', 'whisper')
+}
+
+function runLocalWhisper(executable: string, args: string[], workingDirectory: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const process = spawn(executable, args, {
+      cwd: workingDirectory,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    let errorOutput = ''
+    process.stderr.on('data', (chunk: Buffer) => {
+      if (errorOutput.length < 12_000) errorOutput += chunk.toString('utf8')
+    })
+    process.on('error', reject)
+    process.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`El motor local terminó con el código ${code}.${errorOutput.trim() ? ` ${errorOutput.trim().slice(-800)}` : ''}`))
+    })
+  })
+}
+
+async function transcribeLocally(input: ProcessAudioInput): Promise<string> {
+  if (!input.mimeType.includes('wav')) {
+    throw new Error('El motor local recibió un formato de audio no compatible.')
+  }
+
+  const engineDirectory = localWhisperDirectory()
+  const executable = join(engineDirectory, 'whisper-cli.exe')
+  const model = join(engineDirectory, 'ggml-base.bin')
+  if (!existsSync(executable) || !existsSync(model)) {
+    throw new Error(
+      app.isPackaged
+        ? 'La instalación no contiene el motor de transcripción local. Reinstala Fluye.'
+        : 'Prepara el motor local ejecutando: npm run prepare:local'
+    )
+  }
+
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'fluye-whisper-'))
+  const audioPath = join(temporaryDirectory, 'dictado.wav')
+  const outputPath = join(temporaryDirectory, 'transcripcion')
+  const vocabulary = vocabularyContext(appData.settings.dictionary)
+  const threadCount = Math.max(2, Math.min(8, availableParallelism() - 1))
+  const args = [
+    '--model', model,
+    '--file', audioPath,
+    '--language', appData.settings.language,
+    '--threads', String(threadCount),
+    '--no-timestamps',
+    '--no-prints',
+    '--output-txt',
+    '--output-file', outputPath
+  ]
+  if (vocabulary.keywords.length) args.push('--prompt', vocabulary.keywords.join(', '))
+
+  try {
+    await writeFile(audioPath, Buffer.from(input.bytes))
+    await runLocalWhisper(executable, args, engineDirectory)
+    try {
+      return (await readFile(`${outputPath}.txt`, 'utf8')).trim()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+      throw error
+    }
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true })
+  }
+}
+
 async function finalizeTranscript(
   rawTranscript: string,
   durationMs: number,
-  client = new OpenAI({ apiKey: getApiKey() })
+  client?: OpenAI
 ): Promise<DictationResult> {
   const vocabulary = vocabularyContext(appData.settings.dictionary)
   const transcript = applyVocabularyCorrections(rawTranscript.trim(), vocabulary.corrections)
@@ -1111,10 +1186,14 @@ async function finalizeTranscript(
   const operation = activeRecordingIntent
   let text = transcript
   if (operation === 'edit') {
+    if (!appData.settings.encryptedApiKey) {
+      throw new Error('La edición por voz necesita una clave de OpenAI. El dictado local sí funciona sin ella.')
+    }
     if (!pendingEditSelection?.trim()) {
       throw new Error('La selección de texto ya no está disponible. Vuelve a seleccionarla e inténtalo de nuevo.')
     }
-    const response = await client.responses.create({
+    const openAI = client ?? new OpenAI({ apiKey: getApiKey() })
+    const response = await openAI.responses.create({
       model: appData.settings.polishModel,
       reasoning: { effort: 'none' },
       instructions: editSelectionInstructions(),
@@ -1126,8 +1205,9 @@ async function finalizeTranscript(
     })
     text = response.output_text.trim()
     if (!text) throw new Error('No se pudo generar el texto de reemplazo.')
-  } else if (appData.settings.mode !== 'literal') {
-    const response = await client.responses.create({
+  } else if (appData.settings.transcriptionProvider === 'openai' && appData.settings.mode !== 'literal') {
+    const openAI = client ?? new OpenAI({ apiKey: getApiKey() })
+    const response = await openAI.responses.create({
       model: appData.settings.polishModel,
       reasoning: { effort: 'none' },
       instructions: polishInstructions(appData.settings.mode, vocabulary.corrections),
@@ -1160,6 +1240,12 @@ async function processAudio(
   input: ProcessAudioInput,
   onPartial: (text: string) => void
 ): Promise<DictationResult> {
+  if (appData.settings.transcriptionProvider === 'local') {
+    const localTranscript = await transcribeLocally(input)
+    if (localTranscript) onPartial(localTranscript)
+    return finalizeTranscript(localTranscript, input.durationMs)
+  }
+
   const key = getApiKey()
   const client = new OpenAI({ apiKey: key })
   const extension = input.mimeType.includes('ogg') ? 'ogg' : 'webm'
@@ -1251,6 +1337,8 @@ function registerIpc(): void {
       ...input,
       shortcut: normalizeShortcut(input.shortcut),
       editShortcut: normalizeShortcut(input.editShortcut),
+      mode: input.transcriptionProvider === 'local' ? 'literal' : input.mode,
+      realtimeEnabled: input.transcriptionProvider === 'openai' && input.realtimeEnabled,
       dictionary: input.dictionary.map((item) => item.trim()).filter(Boolean)
     }
     delete (next as StoredSettings & { apiKey?: string }).apiKey
@@ -1298,6 +1386,9 @@ function registerIpc(): void {
     }
   })
   ipcMain.handle('realtime:start', async (event) => {
+    if (appData.settings.transcriptionProvider !== 'openai') {
+      throw new Error('La transcripción en tiempo real está disponible con el motor OpenAI.')
+    }
     const senderId = event.sender.id
     realtimeSessions.get(senderId)?.cancel()
 

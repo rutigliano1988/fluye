@@ -25,6 +25,7 @@ function formatShortcut(shortcut: string): string {
 export default function Onboarding({ settings, onSave, onFinished }: OnboardingProps): React.JSX.Element {
   const [step, setStep] = useState(0)
   const [apiKey, setApiKey] = useState('')
+  const [transcriptionProvider, setTranscriptionProvider] = useState(settings.transcriptionProvider)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [micReady, setMicReady] = useState(false)
@@ -90,20 +91,21 @@ export default function Onboarding({ settings, onSave, onFinished }: OnboardingP
     }
   }
 
-  const saveApiKey = async (): Promise<void> => {
-    if (!settings.hasApiKey && !apiKey.trim()) {
+  const saveConnection = async (): Promise<void> => {
+    if (transcriptionProvider === 'openai' && !settings.hasApiKey && !apiKey.trim()) {
       setError('Introduce una clave de API para continuar.')
-      return
-    }
-    if (!apiKey.trim()) {
-      setStep(2)
       return
     }
 
     setBusy(true)
     setError('')
     try {
-      await onSave({ apiKey: apiKey.trim() })
+      await onSave({
+        transcriptionProvider,
+        mode: transcriptionProvider === 'local' ? 'literal' : settings.mode,
+        realtimeEnabled: transcriptionProvider === 'openai' && settings.realtimeEnabled,
+        apiKey: apiKey.trim() || undefined
+      })
       setApiKey('')
       setStep(2)
     } catch (saveError) {
@@ -141,7 +143,7 @@ export default function Onboarding({ settings, onSave, onFinished }: OnboardingP
             <div className="onboarding__step onboarding__welcome">
               <span className="onboarding__eyebrow">BIENVENIDO A FLUYE</span>
               <h1>Tu voz, convertida en texto donde la necesites.</h1>
-              <p>En menos de dos minutos conectaremos tu API, comprobaremos el micrófono y te enseñaremos los atajos.</p>
+              <p>En menos de dos minutos elegiremos el motor, comprobaremos el micrófono y te enseñaremos los atajos.</p>
               <div className="onboarding__features">
                 <article><span>01</span><strong>Dicta en cualquier aplicación</strong><small>Teams, Outlook, navegador y editores.</small></article>
                 <article><span>02</span><strong>Edita texto con la voz</strong><small>Selecciona un fragmento y di cómo cambiarlo.</small></article>
@@ -153,8 +155,19 @@ export default function Onboarding({ settings, onSave, onFinished }: OnboardingP
           {step === 1 && (
             <div className="onboarding__step">
               <span className="onboarding__eyebrow">PASO 1 · CONEXIÓN</span>
-              <h1>Conecta tu clave de OpenAI</h1>
-              <p>Fluye la cifra con la protección de Windows. Después de guardarla no volverá a mostrarse.</p>
+              <h1>¿Dónde quieres transcribir?</h1>
+              <p>Puedes empezar sin cuenta usando Whisper en este PC, o conectar OpenAI para ver el texto mientras hablas.</p>
+              <label className="onboarding__field">
+                <span>Motor de transcripción</span>
+                <select
+                  value={transcriptionProvider}
+                  onChange={(event) => setTranscriptionProvider(event.target.value as PublicSettings['transcriptionProvider'])}
+                >
+                  <option value="local">Local · privado y sin clave API</option>
+                  <option value="openai">OpenAI · nube y transcripción en vivo</option>
+                </select>
+              </label>
+              {transcriptionProvider === 'openai' && (
               <label className="onboarding__field">
                 <span>Clave de API</span>
                 <input
@@ -164,10 +177,15 @@ export default function Onboarding({ settings, onSave, onFinished }: OnboardingP
                   placeholder={settings.hasApiKey ? '••••••••••••  Ya tienes una clave guardada' : 'sk-…'}
                   autoFocus
                   autoComplete="off"
-                  onKeyDown={(event) => { if (event.key === 'Enter') void saveApiKey() }}
+                  onKeyDown={(event) => { if (event.key === 'Enter') void saveConnection() }}
                 />
               </label>
-              <div className="onboarding__notice"><span>⌁</span><p>El audio se envía a la API de OpenAI para transcribirlo. Las transformaciones de texto usan <code>store: false</code>.</p></div>
+              )}
+              <div className="onboarding__notice"><span>⌁</span><p>
+                {transcriptionProvider === 'local'
+                  ? 'El audio permanece en tu equipo. La primera transcripción puede tardar un poco más mientras se carga el modelo.'
+                  : <>La clave se cifra con la protección de Windows. Las transformaciones de texto usan <code>store: false</code>.</>}
+              </p></div>
             </div>
           )}
 
@@ -199,7 +217,7 @@ export default function Onboarding({ settings, onSave, onFinished }: OnboardingP
               <p>Mantén el atajo mientras hablas y suéltalo al terminar. Puedes cambiarlos en Ajustes cuando quieras.</p>
               <div className="onboarding__shortcuts">
                 <article><span>DICTAR TEXTO NUEVO</span><kbd>{formatShortcut(settings.shortcut)}</kbd><p>Coloca el cursor y habla.</p></article>
-                <article><span>EDITAR UNA SELECCIÓN</span><kbd>{formatShortcut(settings.editShortcut)}</kbd><p>Selecciona texto y di “hazlo más formal”, “resúmelo”…</p></article>
+                <article><span>EDITAR UNA SELECCIÓN</span><kbd>{formatShortcut(settings.editShortcut)}</kbd><p>{settings.hasApiKey ? 'Selecciona texto y di “hazlo más formal”, “resúmelo”…' : 'Función opcional: requiere una clave de OpenAI.'}</p></article>
               </div>
               <div className="onboarding__ready"><span>✓</span><p><strong>Fluye está preparado.</strong> Seguirá disponible desde la bandeja del sistema aunque ocultes la ventana.</p></div>
             </div>
@@ -211,7 +229,7 @@ export default function Onboarding({ settings, onSave, onFinished }: OnboardingP
         <footer className="onboarding__footer">
           <button className="onboarding__back" type="button" disabled={step === 0 || busy} onClick={() => { setError(''); setStep((value) => value - 1) }}>Atrás</button>
           {step === 0 && <button className="primary-button" type="button" onClick={() => setStep(1)}>Comenzar</button>}
-          {step === 1 && <button className="primary-button" type="button" disabled={busy} onClick={() => void saveApiKey()}>{busy ? 'Guardando…' : settings.hasApiKey && !apiKey ? 'Continuar' : 'Guardar y continuar'}</button>}
+          {step === 1 && <button className="primary-button" type="button" disabled={busy} onClick={() => void saveConnection()}>{busy ? 'Guardando…' : transcriptionProvider === 'local' ? 'Usar transcripción local' : settings.hasApiKey && !apiKey ? 'Continuar' : 'Guardar y continuar'}</button>}
           {step === 2 && <button className="primary-button" type="button" disabled={!micAttempted} onClick={() => { stopMicTest(); setStep(3) }}>{micReady ? 'Continuar' : micAttempted ? 'Continuar de todos modos' : 'Prueba el micrófono para continuar'}</button>}
           {step === 3 && <button className="primary-button" type="button" disabled={busy} onClick={() => void finish()}>{busy ? 'Preparando Fluye…' : 'Empezar a usar Fluye'}</button>}
         </footer>

@@ -3,6 +3,7 @@ export type AppStatus = 'idle' | 'recording' | 'processing' | 'success' | 'error
 export type RealtimeDelay = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 export type ShortcutMode = 'hold' | 'toggle'
 export type RecordingIntent = 'dictation' | 'edit'
+export type TranscriptionProvider = 'openai' | 'local'
 
 export interface PublicSettings {
   shortcut: string
@@ -13,6 +14,7 @@ export interface PublicSettings {
   mode: DictationMode
   autoPaste: boolean
   launchAtLogin: boolean
+  transcriptionProvider: TranscriptionProvider
   realtimeEnabled: boolean
   realtimeDelay: RealtimeDelay
   transcriptionModel: string

@@ -10,6 +10,7 @@ Primer MVP de una aplicación de dictado inteligente para Windows, inspirado en 
 - Captura visual de nuevos atajos sin tener que escribir el formato de Electron.
 - Captura de micrófono con cancelación de eco y ruido.
 - Medidor de volumen real mientras hablas.
+- Transcripción completamente local mediante Whisper Base: sin clave API y sin enviar el audio a Internet.
 - Transcripción en tiempo real mediante `gpt-live-transcribe`, visible mientras hablas.
 - Latencia en vivo configurable y vocabulario aplicado desde el inicio de la sesión.
 - Respaldo automático mediante `gpt-transcribe` si la conexión WebSocket no está disponible o se interrumpe.
@@ -24,13 +25,14 @@ Primer MVP de una aplicación de dictado inteligente para Windows, inspirado en 
 - Correcciones aprendidas con el formato `forma detectada → forma correcta`.
 - Historial local de los últimos 50 dictados.
 - Clave de API cifrada con la protección del sistema operativo de Electron (`safeStorage`, respaldada por Windows DPAPI).
-- Asistente de primera ejecución para guardar la API, comprobar el micrófono y aprender los atajos.
+- Asistente de primera ejecución para elegir el motor, comprobar el micrófono y aprender los atajos.
 - Instalador asistido de Windows con icono propio, accesos directos y apertura automática al terminar.
 - Actualizaciones integradas desde las versiones públicas de GitHub Releases.
 
 ## Puesta en marcha
 
-Requisitos: Windows 10/11, Node.js 22 o posterior y una clave de la API de OpenAI.
+Requisitos: Windows 10/11 y Node.js 22 o posterior. La clave de OpenAI es opcional
+si se selecciona el motor local.
 
 ```powershell
 npm install
@@ -55,7 +57,7 @@ checksums oficiales incluidos en el paquete.
 Al abrir Fluye por primera vez:
 
 1. Entra en **Ajustes**.
-2. Añade tu clave de API.
+2. Elige **Local · Whisper Base** o añade tu clave para usar **OpenAI**.
 3. Guarda los ajustes.
 4. Abre cualquier editor de texto, mantén `Ctrl + Alt + Espacio`, habla y suelta el atajo.
 
@@ -75,7 +77,7 @@ npm run build
 npm run dist
 ```
 
-La versión actual se genera en `release-package/Fluye-Setup-0.3.1.exe`. El instalador
+La versión actual se genera en `release-package/Fluye-Setup-0.4.0.exe`. El instalador
 permite elegir la carpeta, crea accesos directos en el escritorio y el menú
 Inicio, y abre Fluye al terminar. En el primer arranque aparece el asistente de
 configuración; puede volver a abrirse desde **Ajustes → Conexión**.
@@ -86,7 +88,7 @@ Las actualizaciones usan el repositorio público
 [`rutigliano1988/fluye`](https://github.com/rutigliano1988/fluye). Para publicar:
 
 1. Actualiza `version` en `package.json` y `package-lock.json`.
-2. Confirma los cambios y crea una etiqueta con el mismo número, por ejemplo `v0.3.1`.
+2. Confirma los cambios y crea una etiqueta con el mismo número, por ejemplo `v0.4.0`.
 3. Sube la etiqueta a GitHub.
 4. El workflow `Release Windows` compila el instalador y publica el `.exe`, su
    blockmap y `latest.yml` en GitHub Releases.
@@ -97,7 +99,14 @@ requiere confirmación y la instalación solo comienza al pulsar **Reiniciar e i
 
 ## Privacidad
 
-El audio se transmite a la API de OpenAI mientras dictas. Fluye conserva temporalmente una grabación en memoria para poder completar el dictado mediante la API de transcripción por archivo si la sesión en vivo falla. Si el modo no es **Literal**, la transcripción también se envía a la Responses API para corregirla. Al editar por voz, el texto seleccionado y la instrucción hablada se envían a la Responses API para generar el reemplazo. Estas solicitudes usan `store: false`.
+Con el motor **Local**, el audio se procesa en el equipo mediante Whisper Base y no
+se envía a Internet. El resultado aparece al terminar de hablar. Con el motor
+**OpenAI**, el audio se transmite a su API y Fluye conserva temporalmente una
+grabación en memoria para completar el dictado si la sesión en vivo falla. Si el
+modo no es **Literal**, la transcripción se envía a la Responses API para
+corregirla. Al editar por voz, el texto seleccionado y la instrucción hablada se
+envían a la Responses API para generar el reemplazo. Estas solicitudes usan
+`store: false`.
 
 La clave de API se guarda cifrada para el usuario actual de Windows. El historial permanece en el almacenamiento local de la aplicación. Puede borrarse desde la pantalla **Historial**.
 
@@ -117,5 +126,6 @@ src/
 
 - El pegado utiliza `Ctrl + V` a través de Windows. Una aplicación ejecutada como administrador puede rechazar la entrada de Fluye si Fluye no tiene el mismo nivel de permisos.
 - La red debe permitir conexiones WebSocket seguras para ver la transcripción en vivo. Si las bloquea, Fluye usa automáticamente la grabación por archivo al terminar.
-- La aplicación requiere conexión a Internet. Un motor local puede añadirse después como proveedor alternativo.
+- La transcripción local aparece al terminar; el texto en vivo requiere el motor OpenAI y conexión a Internet.
+- Los modos generativos y la edición de una selección requieren una clave de OpenAI. El dictado local básico no la necesita.
 - El instalador aún no está firmado digitalmente, por lo que Windows SmartScreen puede mostrar un aviso durante desarrollo.
