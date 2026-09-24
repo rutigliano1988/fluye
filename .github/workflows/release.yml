@@ -37,8 +37,37 @@ jobs:
             throw "La etiqueta $env:GITHUB_REF_NAME no coincide con package.json ($packageVersion)."
           }
 
-      - name: Compilar y publicar GitHub Release
-        run: npm run release
+      - name: Compilar instalador
+        run: npm run dist
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Publicar archivos en GitHub Release
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $tag = "v$packageVersion"
+          $assets = @(
+            "release-package/Fluye-Setup-$packageVersion.exe",
+            "release-package/Fluye-Setup-$packageVersion.exe.blockmap",
+            "release-package/latest.yml"
+          )
+
+          foreach ($asset in $assets) {
+            if (-not (Test-Path -LiteralPath $asset)) {
+              throw "No se generó el archivo requerido: $asset"
+            }
+          }
+
+          gh release view $tag --repo rutigliano1988/fluye *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber --repo rutigliano1988/fluye
+          } else {
+            gh release create $tag @assets --title $packageVersion --generate-notes --repo rutigliano1988/fluye
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "No se pudieron publicar los archivos de la versión $packageVersion."
+          }
