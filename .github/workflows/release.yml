@@ -37,6 +37,14 @@ jobs:
             throw "La etiqueta $env:GITHUB_REF_NAME no coincide con package.json ($packageVersion)."
           }
 
+      - name: Verificar escritura y recuperación del foco
+        shell: pwsh
+        run: |
+          node scripts/windows-input.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Fallaron las pruebas del proceso de escritura.' }
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows-focus.test.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Fallaron las pruebas de recuperación del foco.' }
+
       - name: Compilar instalador
         run: npm run dist
         env:
@@ -65,7 +73,12 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --clobber --repo rutigliano1988/fluye
           } else {
-            gh release create $tag @assets --title $packageVersion --generate-notes --repo rutigliano1988/fluye
+            $notesFile = "docs/versions/$packageVersion.md"
+            if (Test-Path -LiteralPath $notesFile) {
+              gh release create $tag @assets --title $packageVersion --notes-file $notesFile --repo rutigliano1988/fluye
+            } else {
+              gh release create $tag @assets --title $packageVersion --generate-notes --repo rutigliano1988/fluye
+            }
           }
 
           if ($LASTEXITCODE -ne 0) {

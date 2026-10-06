@@ -23,6 +23,7 @@ import OpenAI, { toFile } from 'openai'
 import { OpenAIRealtimeWS } from 'openai/realtime/ws'
 import WebSocket from 'ws'
 import { autoUpdater } from 'electron-updater'
+import { WindowsInput } from './windows-input'
 import type {
   DictationMode,
   DictationResult,
@@ -78,7 +79,8 @@ let holdShortcutRestartTimer: NodeJS.Timeout | null = null
 let shortcutCaptureActive = false
 let recordingRequested = false
 let currentAppStatus: StatusPayload['status'] = 'idle'
-let lockedTargetHandle: string | null = null
+const windowsInput = new WindowsInput()
+let lockedTarget: Promise<string | null> | null = null
 let activeRecordingIntent: RecordingIntent = 'dictation'
 let pendingEditSelection: string | null = null
 let updateCheckTimer: NodeJS.Timeout | null = null
@@ -259,6 +261,7 @@ function createMainWindow(): void {
       preload: join(currentDir, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
       sandbox: true
     }
   })
@@ -297,6 +300,7 @@ function createOverlayWindow(): void {
       preload: join(currentDir, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
       sandbox: true
     }
   })
@@ -576,49 +580,16 @@ function ensureShortcutRegistration(): void {
   }
 }
 
-function captureForegroundWindowHandle(): Promise<string | null> {
-  const nativeDefinition = [
-    'using System;',
-    'using System.Runtime.InteropServices;',
-    'public static class FluyeForeground {',
-    '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
-    '}'
-  ].join(' ')
-  const command = `Add-Type -TypeDefinition '${nativeDefinition}'; [Console]::Out.Write([FluyeForeground]::GetForegroundWindow().ToInt64())`
-
-  return new Promise((resolve) => {
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', command],
-      { windowsHide: true }
-    )
-    let output = ''
-    const timer = setTimeout(() => {
-      child.kill()
-      resolve(null)
-    }, 1_500)
-    child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => { output += chunk })
-    child.once('error', () => {
-      clearTimeout(timer)
-      resolve(null)
-    })
-    child.once('exit', () => {
-      clearTimeout(timer)
-      const handle = output.trim()
-      resolve(/^\d+$/.test(handle) && handle !== '0' ? handle : null)
-    })
-  })
-}
-
 async function requestRecordingStart(intent: RecordingIntent, targetHandle?: string): Promise<void> {
-  if (recordingRequested || currentAppStatus === 'recording' || currentAppStatus === 'processing') return
+  if (recordingRequested || currentAppStatus === 'starting' || currentAppStatus === 'recording' || currentAppStatus === 'processing') return
   recordingRequested = true
   activeRecordingIntent = intent
   pendingEditSelection = null
-  lockedTargetHandle = /^\d+$/.test(targetHandle ?? '')
-    ? targetHandle!
-    : await captureForegroundWindowHandle()
+  // Capture the editor without delaying microphone startup. The overlay never takes focus.
+  lockedTarget = windowsInput.capture(targetHandle).catch(() => {
+    console.warn('[Fluye input] capture-failed')
+    return null
+  })
 
   if (!mainWindow || mainWindow.isDestroyed()) {
     recordingRequested = false
@@ -633,14 +604,14 @@ async function requestRecordingStop(): Promise<void> {
 
   if (activeRecordingIntent === 'edit') {
     try {
-      pendingEditSelection = await captureSelectedText(lockedTargetHandle)
+      pendingEditSelection = await captureSelectedText(await lockedTarget)
       if (!pendingEditSelection?.trim()) {
         throw new Error('No encontré texto seleccionado. Selecciona un fragmento antes de usar el atajo de edición.')
       }
     } catch (error) {
       const message = normalizeError(error)
       pendingEditSelection = null
-      lockedTargetHandle = null
+      lockedTarget = null
       currentAppStatus = 'error'
       mainWindow?.webContents.send('recording:error', message)
       updateStatus({ status: 'error', message })
@@ -743,78 +714,6 @@ async function restoreClipboardSnapshot(snapshot: ClipboardSnapshot): Promise<vo
   else clipboard.clear()
 }
 
-async function sendNativeCtrlShortcut(
-  targetHandle: string | null,
-  virtualKey: number,
-  waitForRelease: number[] = []
-): Promise<void> {
-  if (targetHandle !== null && !/^\d+$/.test(targetHandle)) {
-    throw new Error('La ventana de destino ya no está disponible.')
-  }
-
-  const nativeDefinition = [
-    'using System;',
-    'using System.Runtime.InteropServices;',
-    'public static class FluyeWindowFocus {',
-    '[DllImport("user32.dll")] static extern bool IsWindow(IntPtr hWnd);',
-    '[DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);',
-    '[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);',
-    '[DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();',
-    '[DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);',
-    '[DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();',
-    '[DllImport("user32.dll")] static extern bool AttachThreadInput(uint from, uint to, bool attach);',
-    '[DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hWnd, int command);',
-    '[DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hWnd);',
-    '[DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);',
-    '[DllImport("user32.dll")] static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);',
-    'public static bool Activate(long value) {',
-    'var target = new IntPtr(value); if (!IsWindow(target)) return false;',
-    'var currentThread = GetCurrentThreadId();',
-    'var foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);',
-    'var targetThread = GetWindowThreadProcessId(target, IntPtr.Zero);',
-    'var attachedForeground = foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);',
-    'var attachedTarget = targetThread != currentThread && AttachThreadInput(currentThread, targetThread, true);',
-    'if (IsIconic(target)) ShowWindowAsync(target, 9); else ShowWindowAsync(target, 5);',
-    'BringWindowToTop(target); SetForegroundWindow(target);',
-    'if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);',
-    'if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);',
-    'return GetForegroundWindow() == target;',
-    '}',
-    'public static void SendCtrlShortcut(byte key) {',
-    'keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(key, 0, 0, UIntPtr.Zero);',
-    'keybd_event(key, 0, 2, UIntPtr.Zero); keybd_event(0x11, 0, 2, UIntPtr.Zero);',
-    '}',
-    '}'
-  ].join(' ')
-  const command = [
-    `Add-Type -TypeDefinition '${nativeDefinition}'`,
-    waitForRelease.length ? `$releaseKeys = @(${waitForRelease.join(',')})` : '',
-    waitForRelease.length ? '$deadline = [DateTime]::UtcNow.AddMilliseconds(1800)' : '',
-    waitForRelease.length ? 'do { $down = $false; foreach ($key in $releaseKeys) { if (([FluyeWindowFocus]::GetAsyncKeyState($key) -band 0x8000) -ne 0) { $down = $true; break } }; if ($down) { Start-Sleep -Milliseconds 12 } } while ($down -and [DateTime]::UtcNow -lt $deadline)' : '',
-    waitForRelease.length ? 'if ($down) { exit 4 }' : '',
-    targetHandle
-      ? `if (-not [FluyeWindowFocus]::Activate(${targetHandle})) { exit 3 }`
-      : '',
-    'Start-Sleep -Milliseconds 140',
-    `[FluyeWindowFocus]::SendCtrlShortcut(${virtualKey})`
-  ].filter(Boolean).join('; ')
-
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', command],
-      { windowsHide: true }
-    )
-    child.once('error', reject)
-    child.once('exit', (code) => {
-      if (code === 0) resolve()
-      else if (code === 3) reject(new Error('No se pudo recuperar la ventana donde comenzó la acción.'))
-      else if (code === 4) reject(new Error('Suelta el atajo antes de terminar la acción.'))
-      else reject(new Error('No se pudo enviar el atajo a la aplicación de destino.'))
-    })
-  })
-}
-
 async function captureSelectedText(targetHandle: string | null): Promise<string | null> {
   if (!targetHandle) throw new Error('No se pudo identificar la ventana que contiene la selección.')
   const snapshot = await captureClipboardSnapshot()
@@ -822,7 +721,7 @@ async function captureSelectedText(targetHandle: string | null): Promise<string 
 
   try {
     await clipboard.writeText(sentinel)
-    await sendNativeCtrlShortcut(
+    await windowsInput.send(
       targetHandle,
       0x43,
       shortcutVirtualKeys(appData.settings.editShortcut)
@@ -839,21 +738,23 @@ async function captureSelectedText(targetHandle: string | null): Promise<string 
   }
 }
 
-async function pasteIntoActiveWindow(text: string, forcePaste = false): Promise<void> {
-  const targetHandle = lockedTargetHandle
-  lockedTargetHandle = null
+async function pasteIntoActiveWindow(text: string, forcePaste = false): Promise<'clipboard' | 'inserted'> {
+  const pendingTarget = lockedTarget
+  lockedTarget = null
 
-  if (!appData.settings.autoPaste && !forcePaste) {
+  // The in-app microphone button has no external editor to return to.
+  if ((!appData.settings.autoPaste && !forcePaste) || !pendingTarget) {
     await clipboard.writeText(text)
-    return
+    return 'clipboard'
   }
 
+  const targetHandle = await pendingTarget
   const snapshot = await captureClipboardSnapshot()
   await clipboard.writeText(text)
 
   let pasted = false
   try {
-    await sendNativeCtrlShortcut(targetHandle, 0x56)
+    await windowsInput.send(targetHandle, 0x56)
     pasted = true
     await new Promise((resolve) => setTimeout(resolve, 700))
   } finally {
@@ -866,6 +767,7 @@ async function pasteIntoActiveWindow(text: string, forcePaste = false): Promise<
       // La inserción ya terminó; un fallo al restaurar no debe duplicar el texto.
     }
   }
+  return 'inserted'
 }
 
 interface VocabularyContext {
@@ -1230,7 +1132,7 @@ async function finalizeTranscript(
   appData.history.unshift(result)
   appData.history = appData.history.slice(0, 50)
   persistData()
-  await pasteIntoActiveWindow(text, operation === 'edit')
+  result.delivery = await pasteIntoActiveWindow(text, operation === 'edit')
   pendingEditSelection = null
   activeRecordingIntent = 'dictation'
   return result
@@ -1444,9 +1346,9 @@ function registerIpc(): void {
   })
   ipcMain.on('status:set', (_event, payload: StatusPayload) => {
     currentAppStatus = payload.status
-    if (payload.status !== 'recording') recordingRequested = false
+    if (payload.status !== 'recording' && payload.status !== 'starting') recordingRequested = false
     if (payload.status === 'idle' || payload.status === 'error') {
-      lockedTargetHandle = null
+      lockedTarget = null
       pendingEditSelection = null
       activeRecordingIntent = 'dictation'
     }
@@ -1470,6 +1372,7 @@ else app.on('second-instance', () => {
 
 app.whenReady().then(() => {
   appData = loadData()
+  void windowsInput.start().catch(error => console.warn(error.message))
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === 'media')
   })
@@ -1493,6 +1396,7 @@ app.on('before-quit', () => {
 app.on('will-quit', () => {
   if (updateCheckTimer) clearInterval(updateCheckTimer)
   stopHoldShortcutMonitor()
+  windowsInput.stop()
   for (const liveSession of realtimeSessions.values()) liveSession.cancel()
   realtimeSessions.clear()
   globalShortcut.unregisterAll()

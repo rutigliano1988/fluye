@@ -3,6 +3,7 @@ import type { StatusPayload } from '../../shared/types'
 
 const labels = {
   idle: 'Listo',
+  starting: 'Preparando el micrófono',
   recording: 'Fluye está escuchando',
   processing: 'Preparando el texto final',
   success: 'Texto insertado en el destino',
@@ -56,7 +57,7 @@ export default function Overlay(): React.JSX.Element {
   return (
     <main className={`overlay overlay--${payload.status}`} aria-live="polite">
       <div className="overlay__mark">
-        {payload.status === 'processing' ? (
+        {payload.status === 'processing' || payload.status === 'starting' ? (
           <span className="overlay__spinner" />
         ) : payload.status === 'success' ? (
           <span className="overlay__check">✓</span>

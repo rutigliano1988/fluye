@@ -1,5 +1,5 @@
 export type DictationMode = 'clean' | 'literal' | 'message' | 'email'
-export type AppStatus = 'idle' | 'recording' | 'processing' | 'success' | 'error'
+export type AppStatus = 'idle' | 'starting' | 'recording' | 'processing' | 'success' | 'error'
 export type RealtimeDelay = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 export type ShortcutMode = 'hold' | 'toggle'
 export type RecordingIntent = 'dictation' | 'edit'
@@ -36,6 +36,7 @@ export interface DictationResult {
   mode: DictationMode
   durationMs: number
   operation?: RecordingIntent
+  delivery?: 'clipboard' | 'inserted'
 }
 
 export interface RecordingStartPayload {

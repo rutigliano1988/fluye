@@ -286,6 +286,8 @@ export default function App(): React.JSX.Element {
     startingRecordingRef.current = true
     stopAfterStartRef.current = false
     discardRecordingRef.current = false
+    setAppStatus('starting', 'Preparando el micrófono…')
+    const activationStartedAt = performance.now()
     try {
       setPartialTranscript('')
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -361,11 +363,13 @@ export default function App(): React.JSX.Element {
             'success',
             result.operation === 'edit'
               ? 'Texto seleccionado actualizado'
-              : settings.autoPaste
+              : result.delivery === 'inserted'
                 ? 'Insertado en la ventana de origen'
                 : 'Copiado al portapapeles'
           )
-          window.setTimeout(() => setAppStatus('idle'), 1600)
+          window.setTimeout(() => {
+            if (statusRef.current === 'success') setAppStatus('idle')
+          }, 1600)
         } catch (error) {
           setAppStatus('error', cleanError(error))
         } finally {
@@ -377,6 +381,7 @@ export default function App(): React.JSX.Element {
       }
 
       recorder.start(250)
+      console.info(`[Fluye] Microphone ready in ${Math.round(performance.now() - activationStartedAt)} ms`)
       setAppStatus(
         'recording',
         intent === 'edit' ? 'Dime cómo quieres cambiar el texto seleccionado' : ''
@@ -634,7 +639,7 @@ export default function App(): React.JSX.Element {
     [settings]
   )
 
-  const isBusy = status === 'processing'
+  const isBusy = status === 'processing' || status === 'starting'
   const readyToDictate = Boolean(
     settings && (settings.transcriptionProvider === 'local' || settings.hasApiKey)
   )
@@ -713,19 +718,21 @@ export default function App(): React.JSX.Element {
                   disabled={isBusy}
                   aria-label={status === 'recording' ? 'Detener dictado' : 'Comenzar dictado'}
                 >
-                  {status === 'processing' ? <span className="large-spinner" /> : <MicIcon />}
+                  {isBusy ? <span className="large-spinner" /> : <MicIcon />}
                 </button>
               </div>
               <h2>
                 {status === 'recording'
                   ? 'Te escucho…'
-                  : status === 'processing'
-                    ? 'Dándole forma…'
-                    : status === 'success'
-                      ? 'Ya está'
-                      : status === 'error'
-                        ? 'Revisemos esto'
-                        : 'Pulsa para hablar'}
+                  : status === 'starting'
+                    ? 'Preparando el micrófono'
+                    : status === 'processing'
+                      ? 'Dándole forma…'
+                      : status === 'success'
+                        ? 'Ya está'
+                        : status === 'error'
+                          ? 'Revisemos esto'
+                          : 'Pulsa para hablar'}
               </h2>
               <p className={status === 'error' ? 'error-text' : ''}>
                 {message || (status === 'recording'
